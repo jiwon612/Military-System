@@ -1,0 +1,130 @@
+#include "xparameters.h"
+ #include "xspips.h"
+ #include "xuartps.h"
+ #include "xil_printf.h"
+ #include <string.h>
+ #include <stdlib.h>
+ #include <stdbool.h>
+ #define UART_DEVICE_ID XPAR_XUARTPS_0_DEVICE_ID
+ #define SPI_DEVICE_ID XPAR_XSPIPS_0_DEVICE_ID
+ #define BUFFER_SIZE 512
+ #define DELAY_200_MS 200000 // 0.2
+ #define FENCE_Y_MIN 110
+#define FENCE_Y_MAX 130
+ XSpiPs SpiInstance;
+ XUartPs Uart;
+ char RecvBuffer[BUFFER_SIZE];
+ char PrevData[BUFFER_SIZE] = ""; // 이전 텍스트 파일 데이터 저장
+void delay_microseconds(int microseconds) {
+ for (volatile int i = 0; i < (microseconds * 100); i++);
+ }
+ int init_uart() {
+ XUartPs_Config *Config;
+ int Status;
+ Config = XUartPs_LookupConfig(UART_DEVICE_ID);
+ if (Config == NULL) {
+ xil_printf("Failed to find UART config.\n");
+ return XST_FAILURE;
+ }
+ Status = XUartPs_CfgInitialize(&Uart, Config, Config->BaseAddress);
+ if (Status != XST_SUCCESS) {
+ xil_printf("Failed to initialize UART.\n");
+ return XST_FAILURE;
+ }
+ XUartPs_SetBaudRate(&Uart, 115200);
+ return XST_SUCCESS;
+ }
+ int init_spi() {
+ XSpiPs_Config *Config;
+ int Status;
+ Config = XSpiPs_LookupConfig(SPI_DEVICE_ID);
+ if (Config == NULL) {
+ xil_printf("Failed to find SPI config.\n");
+ return XST_FAILURE;
+ }
+ Status = XSpiPs_CfgInitialize(&SpiInstance, Config, Config->BaseAddress);
+ if (Status != XST_SUCCESS) {
+ xil_printf("Failed to initialize SPI.\n");
+return XST_FAILURE;
+ }
+ XSpiPs_SetClkPrescaler(&SpiInstance, XSPIPS_CLK_PRESCALE_64);
+ XSpiPs_SetOptions(&SpiInstance, XSPIPS_MASTER_OPTION);
+ return XST_SUCCESS;
+ }
+ // 구역 계산함수
+u8 calculate_zone(float x_center) {
+ return (u8)((x_center / 64) + 1); // 1~6 구역 반환
+}
+ // 객체 타입및좌표가공함수
+u8 process_object(int obj_type, float x_center, float y_center) {
+ u8 result = 0;
+ // 객체 유형처리
+if (obj_type == 0) { // 적군
+if (y_center >= FENCE_Y_MIN && y_center <= FENCE_Y_MAX) {
+ result |= (0b01 << 3); // 철책선 상
+} else {
+ result |= (0b10 << 3); // 철책선 밖
+}
+ } else if (obj_type == 2) { // 동물
+result |= (0b11 << 3);
+ }
+ // 구역 처리
+u8 zone = calculate_zone(x_center);
+ result |= (zone & 0b111); // 구역 정보 추가
+return result;
+ }
+ // 텍스트파일처리및데이터생성함수
+u8 parse_and_process_data(const char *data) {
+ char line[128];
+ char *line_ptr;
+ u8 processed_data = 0;
+ // 데이터라인별처리
+line_ptr = strtok((char *)data, "\n");
+ while (line_ptr != NULL) {
+ strcpy(line, line_ptr);
+ // 라인 파싱
+int obj_type;
+ float x_center, y_center, confidence;
+ sscanf(line, "%d %f %f %f", &obj_type, &x_center, &y_center, &confidence);
+ // 객체 유형별처리
+if (obj_type == 1) { // 아군은 전송하지 않음
+line_ptr = strtok(NULL, "\n");
+ continue;
+ }
+ processed_data = process_object(obj_type, x_center, y_center);
+ break; // 한 번에 하나의데이터만처리
+}
+ return processed_data;
+ }
+ int main() {
+ int Status;
+ u8 spi_data = 0;
+ Status = init_uart();
+ if (Status != XST_SUCCESS) return XST_FAILURE;
+ Status = init_spi();
+ if (Status != XST_SUCCESS) return XST_FAILURE;
+ xil_printf("UART and SPI Initialized. Waiting for data...\n");
+ while (1) {
+ memset(RecvBuffer, 0, BUFFER_SIZE);
+ int ReceivedCount = XUartPs_Recv(&Uart, (u8 *)RecvBuffer, BUFFER_SIZE);
+ if (ReceivedCount > 0) {
+ xil_printf("Received Data:\n%s\n", RecvBuffer);
+ // 새 데이터확인
+if (strcmp(RecvBuffer, PrevData) != 0) {
+ strcpy(PrevData, RecvBuffer);
+ spi_data = parse_and_process_data(RecvBuffer);
+ }
+ // SPI 전송
+if (spi_data != 0) {
+ Status = XSpiPs_PolledTransfer(&SpiInstance, &spi_data, NULL, 1);
+ if (Status == XST_SUCCESS) {
+ xil_printf("Sent SPI Data: 0x%02X\n", spi_data);
+ } else {
+ xil_printf("SPI Transfer Failed.\n");
+ }
+ }
+ }
+ delay_microseconds(DELAY_200_MS);
+ }
+return 0;
+ }
